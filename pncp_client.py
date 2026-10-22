@@ -5,9 +5,10 @@ Só lê dados públicos de contratações (editais/avisos) e monta o link da fon
 """
 from __future__ import annotations
 
+import re
 import time
 import unicodedata
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from typing import Iterable
 
 import requests
@@ -200,9 +201,95 @@ def _sem_acento(texto: str | None) -> str:
     return "".join(c for c in texto if not unicodedata.combining(c)).lower()
 
 
-def _relevancia(reg: dict, termos: list[str]) -> int:
+TIPOS = ["Pregão", "Ata/Carona (SRP)", "INEX", "Dispensa"]
+
+# palavras que, digitadas no termo de busca, ativam cada tipo
+_SINONIMOS_TIPO = {
+    "Pregão": "pregao",
+    "Ata/Carona (SRP)": "ata carona adesao registro de precos srp",
+    "INEX": "inex inexigibilidade",
+    "Dispensa": "dispensa",
+}
+STATUS_ENCERRADOS = (
+    "Homologado",
+    "Encerrado (prazo de propostas vencido)",
+    "Encerrado (contratação direta)",
+)
+
+
+def _agora() -> datetime:
+    """Hora de Brasília sem fuso, no mesmo formato das datas do PNCP."""
+    try:
+        from zoneinfo import ZoneInfo
+
+        return datetime.now(ZoneInfo("America/Sao_Paulo")).replace(tzinfo=None)
+    except Exception:  # sem base de fusos no servidor
+        return (datetime.now(timezone.utc) - timedelta(hours=3)).replace(tzinfo=None)
+
+
+def _parse_dt(valor) -> datetime | None:
+    try:
+        return datetime.fromisoformat(valor) if valor else None
+    except (ValueError, TypeError):
+        return None
+
+
+def classificar(reg: dict, agora: datetime | None = None) -> dict:
+    """Acrescenta status do processo e tipos (Pregão, Ata/Carona, INEX, Dispensa).
+
+    O PNCP não tem um campo "encerrado"; ele é derivado de:
+      situação (revogada/anulada/suspensa) > valor homologado > prazo de propostas vencido.
+    Inexigibilidade não tem fase de propostas (datas vêm vazias): sem homologação
+    informada, é tratada como "Encerrado (contratação direta)".
+    "Ata/Carona (SRP)" = compra em registro de preços, de onde nascem as atas para adesão.
+    """
+    agora = agora or _agora()
+    modalidade = _sem_acento(reg.get("modalidade"))
+    situacao = _sem_acento(reg.get("situacao"))
+    fim = _parse_dt(reg.get("encerramento_proposta"))
+
+    tags = []
+    if "pregao" in modalidade:
+        tags.append("Pregão")
+    if reg.get("srp"):
+        tags.append("Ata/Carona (SRP)")
+    if "inexigibilidade" in modalidade:
+        tags.append("INEX")
+    if "dispensa" in modalidade:
+        tags.append("Dispensa")
+
+    if "revogad" in situacao:
+        status = "Revogada"
+    elif "anulad" in situacao:
+        status = "Anulada"
+    elif "suspens" in situacao:
+        status = "Suspensa"
+    elif reg.get("valor_homologado"):
+        status = "Homologado"
+    elif fim and fim < agora:
+        status = "Encerrado (prazo de propostas vencido)"
+    elif fim:
+        status = "Em andamento (propostas abertas)"
+    elif "INEX" in tags:
+        status = "Encerrado (contratação direta)"
+    else:
+        status = "Sem prazo informado"
+
+    encerrado = status in STATUS_ENCERRADOS
+    rotulos = " ".join(
+        [_sem_acento(status), "encerrado" if encerrado else "", *(_SINONIMOS_TIPO[t] for t in tags)]
+    )
+    return {**reg, "status": status, "encerrado": encerrado, "tags": tags, "tipo": ", ".join(tags), "rotulos": rotulos}
+
+
+def _padrao(termo: str) -> re.Pattern:
+    """Casa o início de uma palavra ('ata' não casa com 'contratação')."""
+    return re.compile(r"(?<![a-z0-9])" + re.escape(termo))
+
+
+def _relevancia(reg: dict, padroes: list[re.Pattern]) -> int:
     alvo = _sem_acento(f"{reg.get('objeto')} {reg.get('orgao')}")
-    return sum(alvo.count(t) for t in termos)
+    return sum(len(p.findall(alvo)) for p in padroes)
 
 
 def filtrar_e_ordenar(
@@ -210,20 +297,36 @@ def filtrar_e_ordenar(
     termo: str = "",
     situacoes: Iterable[str] | None = None,
     ordenacao: str = ORDENACOES[0],
+    somente_encerrados: bool = False,
+    tipos: Iterable[str] | None = None,
+    agora: datetime | None = None,
 ) -> list[dict]:
-    """A API do PNCP não tem busca por texto: o termo é aplicado aqui, sobre objeto e órgão."""
-    termos = [t for t in _sem_acento(termo).split() if t]
+    """A API do PNCP não tem busca por texto: o termo é aplicado aqui.
+
+    O termo procura em objeto, órgão, unidade, município e também nos rótulos calculados
+    (ex.: "encerrado", "carona", "inex", "pregão"). Todas as palavras precisam casar.
+    """
+    agora = agora or _agora()
+    padroes = [_padrao(t) for t in _sem_acento(termo).split() if t]
     situacoes = set(situacoes or [])
+    tipos = set(tipos or [])
 
     saida = []
-    for r in registros:
+    for r in (classificar(x, agora) for x in registros):
         if situacoes and r.get("situacao") not in situacoes:
             continue
-        if termos:
-            alvo = _sem_acento(f"{r.get('objeto')} {r.get('orgao')} {r.get('unidade')} {r.get('municipio')}")
-            if not all(t in alvo for t in termos):
+        if somente_encerrados and not r["encerrado"]:
+            continue
+        if tipos and not tipos.intersection(r["tags"]):
+            continue
+        if padroes:
+            alvo = _sem_acento(
+                f"{r.get('objeto')} {r.get('orgao')} {r.get('unidade')} {r.get('municipio')} {r['rotulos']}"
+            )
+            if not all(p.search(alvo) for p in padroes):
                 continue
         saida.append(r)
+    termos = padroes
 
     if ordenacao == "Mais antigos primeiro":
         saida.sort(key=lambda r: r.get("data_publicacao") or "")

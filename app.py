@@ -101,19 +101,39 @@ if not registros:
 
 # filtros locais (não refazem a chamada ao PNCP)
 c1, c2, c3 = st.columns([3, 2, 2])
-termo = c1.text_input("Termo de busca", placeholder="ex.: material escolar, merenda, software…",
-                      help="A API do PNCP não busca por texto: o termo filtra objeto, órgão e município dos resultados carregados.")
-situacoes_disp = sorted({r["situacao"] for r in registros if r["situacao"]})
-situacoes = c2.multiselect("Situação", situacoes_disp)
+termo = c1.text_input(
+    "Termo de busca",
+    placeholder="ex.: encerrado carona merenda · inex software · pregão material escolar",
+    help=(
+        "A API do PNCP não busca por texto: o termo filtra os resultados já carregados "
+        "(objeto, órgão, município) e também os rótulos calculados:\n\n"
+        "• **encerrado** → processos encerrados/homologados\n"
+        "• **carona** ou **ata** → compras em registro de preços (SRP)\n"
+        "• **inex** → inexigibilidade\n"
+        "• **pregão**, **dispensa**\n\n"
+        "Todas as palavras precisam casar. Ex.: `encerrado carona escolar`."
+    ),
+)
+tipos = c2.multiselect("Tipo", pncp.TIPOS, help="Mostra processos de qualquer um dos tipos escolhidos.")
 ordenacao = c3.selectbox("Ordenação", pncp.ORDENACOES)
 
-filtrados = pncp.filtrar_e_ordenar(registros, termo, situacoes, ordenacao)
+f1, f2 = st.columns([1, 2])
+somente_encerrados = f1.toggle(
+    "Somente encerrados",
+    help="Homologados, com prazo de propostas vencido ou inexigibilidades (sem fase de propostas). "
+         "Revogadas, anuladas e suspensas ficam de fora.",
+)
+situacoes_disp = sorted({r["situacao"] for r in registros if r["situacao"]})
+situacoes = f2.multiselect("Situação (PNCP)", situacoes_disp)
+
+filtrados = pncp.filtrar_e_ordenar(registros, termo, situacoes, ordenacao, somente_encerrados, tipos)
 
 total_valor = sum(r["valor_estimado"] or 0 for r in filtrados)
-m1, m2, m3 = st.columns(3)
+m1, m2, m3, m4 = st.columns(4)
 m1.metric("Exibindo", f"{len(filtrados):,}".replace(",", "."))
-m2.metric("Carregadas / total no PNCP", f"{len(registros):,} / {meta['total_pncp']:,}".replace(",", "."))
-m3.metric("Valor estimado somado", moeda(total_valor))
+m2.metric("Encerrados (exibidos)", f"{sum(r['encerrado'] for r in filtrados):,}".replace(",", "."))
+m3.metric("Carregadas / total no PNCP", f"{len(registros):,} / {meta['total_pncp']:,}".replace(",", "."))
+m4.metric("Valor estimado somado", moeda(total_valor))
 if meta["truncado"]:
     st.caption(
         "⚠️ Há mais resultados no PNCP do que o carregado. Aumente 'Páginas por modalidade' "
@@ -126,7 +146,7 @@ if not filtrados:
 
 df = para_dataframe(filtrados)
 tabela = df[[
-    "data_publicacao", "orgao", "municipio", "uf", "modalidade", "objeto", "valor_estimado",
+    "data_publicacao", "orgao", "municipio", "uf", "modalidade", "tipo", "status", "objeto", "valor_estimado",
     "encerramento_proposta", "situacao", "numero_compra", "link_pncp", "link_origem",
 ]]
 
@@ -142,6 +162,8 @@ evento = st.dataframe(
         "municipio": st.column_config.TextColumn("Município"),
         "uf": st.column_config.TextColumn("UF", width="small"),
         "modalidade": st.column_config.TextColumn("Modalidade"),
+        "tipo": st.column_config.TextColumn("Tipo", help="Pregão · Ata/Carona (registro de preços) · INEX · Dispensa"),
+        "status": st.column_config.TextColumn("Status", width="medium"),
         "objeto": st.column_config.TextColumn("Objeto", width="large"),
         "valor_estimado": st.column_config.NumberColumn("Valor estimado", format="R$ %.2f"),
         "encerramento_proposta": st.column_config.DatetimeColumn("Encerra propostas", format="DD/MM/YYYY HH:mm"),
@@ -165,6 +187,7 @@ if evento.selection.rows:
         d2.markdown(f"**Processo:** {r['processo'] or '—'} · Nº {r['numero_compra'] or '—'}")
         d3.markdown(f"**Amparo legal:** {r['amparo_legal'] or '—'}")
         d3.markdown(f"**Registro de preços:** {'Sim' if r['srp'] else 'Não'}")
+        d3.markdown(f"**Status:** {r['status']}")
         if r["informacao_complementar"]:
             st.caption(r["informacao_complementar"])
         if r["link_pncp"]:

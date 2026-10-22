@@ -14,7 +14,13 @@ streamlit run app.py
 
 - **Tipo de consulta**: contratações *publicadas no período* ou *com propostas abertas* até uma data.
 - **Filtros na API**: período, UF e modalidade (uma consulta por modalidade, exigência do PNCP).
-- **Filtros locais** (sem nova chamada): termo de busca (objeto, órgão, município), situação e ordenação.
+- **Filtros locais** (sem nova chamada): termo de busca, tipo, somente encerrados, situação e ordenação.
+- **Status do processo** (calculado, o PNCP não tem campo "encerrado"): revogada/anulada/suspensa >
+  homologado (valor homologado informado) > encerrado (prazo de propostas vencido) > em andamento.
+  Inexigibilidade não tem fase de propostas, então sem homologação vira "Encerrado (contratação direta)".
+- **Tipo**: Pregão, Ata/Carona (SRP = compra em registro de preços), INEX e Dispensa.
+- **Palavras que o termo de busca reconhece**: `encerrado`, `carona`/`ata`, `inex`, `pregão`, `dispensa`
+  (além do texto do objeto/órgão/município). Todas as palavras precisam casar; a busca é por início de palavra.
 - **Dados por contratação**: publicação, órgão, município/UF, modalidade, objeto, valor estimado,
   encerramento de propostas, situação, nº da compra, link do PNCP e link do sistema de origem.
 - Clique numa linha para ver o detalhe (amparo legal, registro de preços, processo etc.).
