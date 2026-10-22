@@ -158,6 +158,12 @@ m1.metric("Exibindo", f"{len(filtrados):,}".replace(",", "."))
 m2.metric("Encerrados (exibidos)", f"{sum(r['encerrado'] for r in filtrados):,}".replace(",", "."))
 m3.metric("Carregados / total no PNCP", f"{len(registros):,} / {meta['total_pncp']:,}".replace(",", "."))
 m4.metric("Valor somado", moeda(total_valor))
+if meta.get("fonte") == "api_oficial":
+    st.warning(
+        "A busca do portal PNCP não respondeu, então usei a API oficial de consulta (só editais). Nesse modo: "
+        "o Ano vira período de publicação (sem ano, últimos 30 dias); o termo filtra só os resultados carregados; "
+        "e Modalidade 'Todas' consulta concorrência, pregão, dispensa e inexigibilidade."
+    )
 if meta["truncado"]:
     st.caption(
         "⚠️ Há mais resultados no PNCP do que o carregado. Aumente 'Páginas a carregar' ou refine "

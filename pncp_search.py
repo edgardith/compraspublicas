@@ -16,15 +16,23 @@ Swagger, então os parâmetros usados aqui foram verificados por teste:
 from __future__ import annotations
 
 import time
+from datetime import date, timedelta
 
 import requests
 
-from pncp_client import PNCPError
+import pncp_client as base
+from pncp_client import PNCPError, PNCPIndisponivel
 
 BASE_URL = "https://pncp.gov.br/api/search/"
 PORTAL_URL = "https://pncp.gov.br/app"
 TAM_PAGINA = 50
 TIMEOUT = 60
+HEADERS = {
+    "User-Agent": "RadarComprasPNCP/1.0 (consulta de dados publicos)",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "pt-BR,pt;q=0.9",
+    "Referer": "https://pncp.gov.br/app/editais",
+}
 
 # rótulo na tela -> valor de tipos_documento
 TIPOS_DOCUMENTO = {
@@ -45,9 +53,7 @@ def _get(params: dict, retries: int = 3) -> dict:
     ultimo_erro = "desconhecido"
     for tentativa in range(retries):
         try:
-            resp = requests.get(
-                BASE_URL, params=params, timeout=TIMEOUT, headers={"Accept": "application/json"}
-            )
+            resp = requests.get(BASE_URL, params=params, timeout=TIMEOUT, headers=HEADERS)
         except requests.RequestException as exc:
             ultimo_erro = str(exc)
         else:
@@ -61,7 +67,7 @@ def _get(params: dict, retries: int = 3) -> dict:
             else:
                 raise PNCPError(f"HTTP {resp.status_code}: {resp.text[:300]}")
         time.sleep(2 ** tentativa)
-    raise PNCPError(f"Falha ao consultar o PNCP após {retries} tentativas: {ultimo_erro}")
+    raise PNCPIndisponivel(f"Falha ao consultar o PNCP após {retries} tentativas: {ultimo_erro}")
 
 
 # ----------------------------------------------------------------------- Normalização
@@ -152,7 +158,7 @@ def montar_params(
     return params
 
 
-def buscar_documentos(
+def _buscar_portal(
     doc: str,
     termo: str = "",
     uf: str | None = None,
@@ -162,7 +168,7 @@ def buscar_documentos(
     ordenacao: str = "Mais recentes primeiro",
     max_paginas: int = 3,
 ) -> tuple[list[dict], dict]:
-    """Busca documentos no PNCP. Retorna (registros normalizados, meta com totais e truncamento)."""
+    """Busca documentos na busca do portal PNCP. Retorna (registros normalizados, meta)."""
     registros: list[dict] = []
     vistos: set = set()
     meta = {"total_pncp": 0, "paginas_lidas": 0, "truncado": False}
@@ -185,4 +191,73 @@ def buscar_documentos(
             break
 
     meta["truncado"] = meta["total_pncp"] > meta["paginas_lidas"] * TAM_PAGINA
+    meta["fonte"] = "portal"
     return registros, meta
+
+
+# ------------------------------------------------------- plano B: API de consulta oficial
+# Modalidades consultadas no plano B quando a modalidade é "Todas":
+# concorrência (4, 5), pregão (6, 7), dispensa (8) e inexigibilidade (9).
+MODALIDADES_PLANO_B = [4, 5, 6, 7, 8, 9]
+
+
+def _buscar_editais_api_oficial(
+    termo: str, uf: str | None, ano: str | int | None, modalidade: int | None, em_vigor: bool, max_paginas: int
+) -> tuple[list[dict], dict]:
+    """Editais pela API de consulta oficial, usada quando o portal não responde.
+
+    Sem busca por texto: o termo filtra só o que foi carregado. O ano vira período de publicação
+    (sem ano: últimos 30 dias) e "em vigor" vira "propostas abertas nos próximos 180 dias".
+    """
+    hoje = date.today()
+    if em_vigor:
+        modo, ini, fim = "proposta", hoje, hoje + timedelta(days=180)
+    elif ano:
+        modo, ini, fim = "publicacao", date(int(ano), 1, 1), min(date(int(ano), 12, 31), hoje)
+    else:
+        modo, ini, fim = "publicacao", hoje - timedelta(days=30), hoje
+
+    registros, meta = base.buscar_contratacoes(
+        modo, ini, fim, [modalidade] if modalidade else MODALIDADES_PLANO_B, uf, max_paginas
+    )
+    registros = [
+        {
+            **r,
+            "tipo_documento": "edital",
+            "titulo": f"{r['modalidade'] or 'Edital'} nº {r['numero_compra']}" if r.get("numero_compra") else r["modalidade"],
+            "vigencia_inicio": None,
+            "vigencia_fim": None,
+            "fornecedor": None,
+            "cancelado": False,
+        }
+        for r in registros
+    ]
+    if termo:
+        registros = base.filtrar_e_ordenar(registros, termo)
+    meta["fonte"] = "api_oficial"
+    return registros, meta
+
+
+def buscar_documentos(
+    doc: str,
+    termo: str = "",
+    uf: str | None = None,
+    ano: str | int | None = None,
+    modalidade: int | None = None,
+    em_vigor: bool = False,
+    ordenacao: str = "Mais recentes primeiro",
+    max_paginas: int = 3,
+) -> tuple[list[dict], dict]:
+    """Busca documentos no PNCP. Retorna (registros normalizados, meta com totais, truncamento e fonte).
+
+    Se a busca do portal não responder, editais passam pela API de consulta oficial
+    (meta["fonte"] == "api_oficial"); contratos, atas e PCA dependem do portal e geram erro.
+    """
+    try:
+        return _buscar_portal(doc, termo, uf, ano, modalidade, em_vigor, ordenacao, max_paginas)
+    except PNCPIndisponivel as exc:
+        if doc != "edital":
+            raise PNCPIndisponivel(
+                f"{exc}. Contratos, atas e planos anuais dependem da busca do portal PNCP, que não respondeu."
+            ) from exc
+        return _buscar_editais_api_oficial(termo, uf, ano, modalidade, em_vigor, max_paginas)

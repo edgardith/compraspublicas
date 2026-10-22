@@ -127,7 +127,7 @@ def test_busca_pagina_deduplica_e_sinaliza_truncamento(monkeypatch):
 
     assert len(chamadas) == 2 and [c["pagina"] for c in chamadas] == [1, 2]
     assert len(regs) == 99  # 100 itens menos 1 duplicado
-    assert meta == {"total_pncp": 500, "paginas_lidas": 2, "truncado": True}
+    assert meta == {"total_pncp": 500, "paginas_lidas": 2, "truncado": True, "fonte": "portal"}
 
 
 def test_busca_para_quando_acaba_o_resultado(monkeypatch):
@@ -144,3 +144,91 @@ def test_erro_de_cliente_sobe_como_pncperror(monkeypatch):
     monkeypatch.setattr(srch.requests, "get", lambda *a, **k: Resp())
     with pytest.raises(pncp.PNCPError):
         srch._get({"q": ""})
+
+
+# ------------------------------------------------------------ conexão e plano B
+def test_requisicao_leva_cabecalhos_de_identificacao(monkeypatch):
+    visto = {}
+
+    class Resp:
+        status_code = 200
+
+        def json(self):
+            return {"items": [], "total": 0}
+
+    def falso_get(url, params=None, timeout=None, headers=None):
+        visto.update(headers or {})
+        return Resp()
+
+    monkeypatch.setattr(srch.requests, "get", falso_get)
+    srch._get({"q": ""})
+    assert "RadarComprasPNCP" in visto["User-Agent"] and visto["Accept"].startswith("application/json")
+
+
+def test_conexao_derrubada_vira_pncp_indisponivel(monkeypatch):
+    def derruba(*a, **k):
+        raise srch.requests.ConnectionError("Connection reset by peer")
+
+    monkeypatch.setattr(srch.requests, "get", derruba)
+    monkeypatch.setattr(srch.time, "sleep", lambda s: None)
+    with pytest.raises(pncp.PNCPIndisponivel) as erro:
+        srch._get({"q": ""})
+    assert "Connection reset by peer" in str(erro.value)
+
+
+def _portal_fora(monkeypatch):
+    def fora(params):
+        raise pncp.PNCPIndisponivel("Falha ao consultar o PNCP após 3 tentativas")
+
+    monkeypatch.setattr(srch, "_get", fora)
+
+
+def test_edital_com_portal_fora_usa_api_oficial(monkeypatch):
+    _portal_fora(monkeypatch)
+    chamadas = []
+    reg = pncp.normalizar({
+        "numeroControlePNCP": "1", "modalidadeNome": "Pregão - Eletrônico", "numeroCompra": "29",
+        "objetoCompra": "Merenda escolar", "orgaoEntidade": {"razaoSocial": "PREF X"},
+    })
+    outro = pncp.normalizar({"numeroControlePNCP": "2", "objetoCompra": "Notebooks"})
+
+    def oficial(modo, ini, fim, modalidades, uf, max_paginas):
+        chamadas.append((modo, ini, fim, modalidades, uf))
+        return [reg, outro], {"total_pncp": 2, "paginas_lidas": 1, "truncado": False}
+
+    monkeypatch.setattr(srch.base, "buscar_contratacoes", oficial)
+    regs, meta = srch.buscar_documentos("edital", termo="merenda", uf="SP", ano="2025")
+
+    assert meta["fonte"] == "api_oficial"
+    assert [r["numero_controle"] for r in regs] == ["1"]  # termo filtra os carregados
+    assert regs[0]["tipo_documento"] == "edital" and regs[0]["titulo"] == "Pregão - Eletrônico nº 29"
+    modo, ini, fim, modalidades, uf = chamadas[0]
+    assert modo == "publicacao" and ini == srch.date(2025, 1, 1) and uf == "SP"
+    assert modalidades == srch.MODALIDADES_PLANO_B
+
+
+def test_plano_b_em_vigor_usa_propostas_abertas_e_modalidade_escolhida(monkeypatch):
+    _portal_fora(monkeypatch)
+    chamadas = []
+    monkeypatch.setattr(srch.base, "buscar_contratacoes",
+                        lambda *a: chamadas.append(a) or ([], {"total_pncp": 0, "paginas_lidas": 1, "truncado": False}))
+    srch.buscar_documentos("edital", em_vigor=True, modalidade=9, uf="SP")
+    modo, _, _, modalidades, _, _ = chamadas[0]
+    assert modo == "proposta" and modalidades == [9]
+
+
+def test_contrato_com_portal_fora_nao_tem_plano_b(monkeypatch):
+    _portal_fora(monkeypatch)
+    with pytest.raises(pncp.PNCPIndisponivel) as erro:
+        srch.buscar_documentos("contrato", uf="SP")
+    assert "dependem da busca do portal" in str(erro.value)
+
+
+def test_erro_4xx_nao_aciona_plano_b(monkeypatch):
+    def invalido(params):
+        raise pncp.PNCPError("HTTP 400: parâmetro inválido")
+
+    monkeypatch.setattr(srch, "_get", invalido)
+    with pytest.raises(pncp.PNCPError) as erro:
+        srch.buscar_documentos("edital", uf="SP")
+    assert not isinstance(erro.value, pncp.PNCPIndisponivel)

@@ -53,6 +53,10 @@ class PNCPError(Exception):
     """Erro ao consultar o PNCP."""
 
 
+class PNCPIndisponivel(PNCPError):
+    """O PNCP não respondeu (conexão recusada/derrubada, timeout ou erro 5xx) após as tentativas."""
+
+
 # --------------------------------------------------------------------------- HTTP
 def _get(path: str, params: dict, retries: int = 3) -> dict:
     """GET com timeout e novas tentativas para erros transitórios."""
