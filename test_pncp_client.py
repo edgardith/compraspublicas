@@ -198,10 +198,44 @@ def test_toggle_encerrados_e_filtro_de_tipo():
     assert _ids(pncp.filtrar_e_ordenar(c, tipos=["INEX", "Ata/Carona (SRP)"], agora=AGORA)) == ["a", "b"]
 
 
-# ---------------------------------------- modalidades derivadas do tipo (Modalidade = Todas)
-def test_modalidades_para_tipos():
-    assert pncp.modalidades_para_tipos(["Pregão"]) == [6, 7]
-    assert pncp.modalidades_para_tipos(["INEX"]) == [9]
-    assert pncp.modalidades_para_tipos(["Pregão", "INEX", "Dispensa"]) == [6, 7, 8, 9]
-    assert pncp.modalidades_para_tipos(["Ata/Carona (SRP)", "Pregão"]) == [4, 5, 6, 7]
-    assert pncp.modalidades_para_tipos([]) == []
+# ------------------------------- palavras-chave locais e documentos com vigência
+def test_separar_termo_tira_palavras_chave_do_texto_do_pncp():
+    assert pncp.separar_termo("encerrado carona merenda escolar") == ("merenda escolar", "encerrado carona")
+    assert pncp.separar_termo("ENCERRADOS Caronas") == ("", "encerrado carona")
+    assert pncp.separar_termo("inex software") == ("software", "inex")
+    assert pncp.separar_termo("ata de registro") == ("ata de registro", "")  # 'ata' é texto normal
+    assert pncp.separar_termo(None) == ("", "")
+
+
+def _doc(doc, **extra):
+    return pncp.classificar({"tipo_documento": doc, "modalidade": None, "situacao": "Divulgada no PNCP", **extra}, AGORA)
+
+
+def test_contrato_e_ata_usam_vigencia():
+    assert _doc("contrato", vigencia_inicio="2025-12-02", vigencia_fim="2026-12-01")["status"] == "Em vigor"
+    assert _doc("contrato", vigencia_inicio="2024-01-01", vigencia_fim="2025-01-01")["status"] == "Vigência encerrada"
+    assert _doc("contrato", vigencia_inicio="2027-01-01", vigencia_fim="2028-01-01")["status"] == "Vigência futura"
+    assert _doc("contrato", vigencia_inicio="2025-12-02", vigencia_fim="2026-12-01", cancelado=True)["status"] == "Cancelada"
+    assert _doc("ata", vigencia_inicio="2026-04-09", vigencia_fim="2026-10-22")["status"] == "Em vigor"  # último dia conta
+    assert _doc("contrato", vigencia_inicio="2024-01-01", vigencia_fim="2025-01-01")["encerrado"]
+
+
+def test_ata_sempre_tem_tag_carona_e_pca_nao_e_encerrado():
+    assert "Ata/Carona (SRP)" in _doc("ata", vigencia_inicio="2026-04-09", vigencia_fim="2027-09-07")["tags"]
+    pca = _doc("pca")
+    assert pca["status"] == "Plano anual" and not pca["encerrado"]
+
+
+def test_filtro_em_vigor_local():
+    regs = [
+        {"tipo_documento": "ata", "numero_controle": "x", "vigencia_inicio": "2026-04-09", "vigencia_fim": "2027-09-07"},
+        {"tipo_documento": "ata", "numero_controle": "y", "vigencia_inicio": "2024-01-01", "vigencia_fim": "2025-01-01"},
+    ]
+    assert [r["numero_controle"] for r in pncp.filtrar_e_ordenar(regs, em_vigor=True, agora=AGORA)] == ["x"]
+
+
+def test_mais_relevantes_mantem_ordem_do_pncp():
+    regs = [_reg(numeroControlePNCP=i, dataPublicacaoPncp=d) for i, d in
+            [("1", "2026-01-01T00:00:00"), ("2", "2026-03-01T00:00:00"), ("3", "2026-02-01T00:00:00")]]
+    ordem = [r["numero_controle"] for r in pncp.filtrar_e_ordenar(regs, ordenacao="Mais relevantes", agora=AGORA)]
+    assert ordem == ["1", "2", "3"]

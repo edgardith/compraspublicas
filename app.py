@@ -1,22 +1,24 @@
-"""Radar de Compras Públicas — lista contratações do PNCP com link para a fonte.
+"""Radar de Compras Públicas — pesquisa editais, contratos, atas e PCAs do PNCP, com link para a fonte.
 
 Rodar:  streamlit run app.py
 """
-from datetime import date, timedelta
+from datetime import date
 
 import pandas as pd
 import streamlit as st
 
 import pncp_client as pncp
+import pncp_search as srch
 
 st.set_page_config(page_title="Radar de Compras Públicas", page_icon="🔎", layout="wide")
 
-TODAS = "Todas"
+TODAS, TODOS = "Todas", "Todos"
+ANOS = [TODOS] + [str(a) for a in range(date.today().year, 2017, -1)]  # ano atual até 2018
 
 
 @st.cache_data(ttl=3600, show_spinner=False)  # cache de 1h, como no sistema de referência
-def buscar(modo, data_ini, data_fim, modalidades, uf, max_paginas):
-    return pncp.buscar_contratacoes(modo, data_ini, data_fim, modalidades, uf, max_paginas)
+def buscar(doc, termo, uf, ano, modalidade, em_vigor, ordenacao, max_paginas):
+    return srch.buscar_documentos(doc, termo, uf, ano, modalidade, em_vigor, ordenacao, max_paginas)
 
 
 def moeda(v):
@@ -25,9 +27,12 @@ def moeda(v):
     return f"R$ {v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
+DATAS = ("data_publicacao", "encerramento_proposta", "vigencia_inicio", "vigencia_fim")
+
+
 def para_dataframe(registros: list[dict]) -> pd.DataFrame:
-    df = pd.DataFrame(registros)
-    for col in ("data_publicacao", "abertura_proposta", "encerramento_proposta"):
+    df = pd.DataFrame(registros).replace({"": None})
+    for col in DATAS:
         df[col] = pd.to_datetime(df[col], errors="coerce")
     return df
 
@@ -35,8 +40,8 @@ def para_dataframe(registros: list[dict]) -> pd.DataFrame:
 # ------------------------------------------------------------------------- cabeçalho
 st.title("🔎 Radar de Compras Públicas")
 st.caption(
-    "Pesquise contratações publicadas no Portal Nacional de Contratações Públicas (PNCP). "
-    "Cada linha leva à página oficial da fonte."
+    "Pesquise editais, contratos, atas e planos anuais publicados no Portal Nacional de Contratações "
+    "Públicas (PNCP). Cada linha leva à página oficial da fonte."
 )
 
 # --------------------------------------------------------------------------- filtros
@@ -44,103 +49,88 @@ st.caption(
 with st.container(border=True):
     termo = st.text_input(
         "Termo de busca",
-        placeholder="ex.: encerrado carona merenda · inex software · pregão material escolar",
+        placeholder="ex.: merenda escolar · encerrado carona software · inex capacitação",
         help=(
-            "A API do PNCP não busca por texto: o termo filtra os resultados carregados "
-            "(objeto, órgão, município) e também os rótulos calculados:\n\n"
-            "• **encerrado** → processos encerrados/homologados\n"
-            "• **carona** ou **ata** → compras em registro de preços (SRP)\n"
-            "• **inex** → inexigibilidade\n"
-            "• **pregão**, **dispensa**\n\n"
-            "Todas as palavras precisam casar. Ex.: `encerrado carona escolar`."
+            "Busca por texto no PNCP. Além do texto, estas palavras filtram os resultados carregados:\n\n"
+            "• **encerrado** → processos encerrados/homologados (ou com vigência encerrada)\n"
+            "• **carona** → registro de preços e atas\n"
+            "• **inex** → inexigibilidade\n\n"
+            "Ex.: `encerrado carona merenda`."
         ),
     )
 
-    # linha 1: tipo (obrigatório), modalidade (opcional), UF
+    # linha 1: tipo de documento (obrigatório), UF, ano
     a1, a2, a3 = st.columns(3)
-    tipos = a1.multiselect(
-        "Tipo (obrigatório)",
-        pncp.TIPOS,
-        default=["Pregão"],
-        help="Obrigatório. Define o que será buscado: Pregão, Ata/Carona (compras em registro de preços), "
-             "INEX (inexigibilidade) e/ou Dispensa.",
+    doc_label = a1.selectbox(
+        "Tipo de documento (obrigatório)",
+        list(srch.TIPOS_DOCUMENTO),
+        help="Obrigatório. Use ao menos um filtro além do tipo de documento.",
     )
-    modalidades_sel = a2.multiselect(
-        "Modalidade (opcional)",
-        [TODAS] + list(pncp.MODALIDADES),
-        default=[TODAS],
-        format_func=lambda c: c if c == TODAS else pncp.MODALIDADES[c],
-        help="**Todas** = o app escolhe as modalidades a partir do Tipo "
-             "(Pregão → 6 e 7 · INEX → 9 · Dispensa → 8 · Ata/Carona → 4, 5, 6 e 7). "
-             "Escolha modalidades específicas para limitar a busca; Tipo e Modalidade se somam, "
-             "então precisam coincidir.",
-    )
-    uf = a3.selectbox("UF", ["Todas"] + pncp.UFS, index=0)
+    uf = a2.selectbox("UF", [TODAS] + pncp.UFS)
+    ano = a3.selectbox("Ano", ANOS)
 
-    # linha 2: consulta, período, situação
+    # linha 2: modalidade, situação, ordenação
     b1, b2, b3 = st.columns(3)
-    modo_label = b1.radio(
-        "Tipo de consulta",
-        ["Publicadas no período", "Com propostas abertas"],
-        help="'Com propostas abertas' lista o que ainda aceita propostas até a data escolhida.",
+    modalidade = b1.selectbox(
+        "Modalidade",
+        [None] + list(pncp.MODALIDADES),
+        format_func=lambda m: TODAS if m is None else pncp.MODALIDADES[m],
+        help="Não se aplica a planos anuais (PCA).",
     )
-    modo = "publicacao" if modo_label == "Publicadas no período" else "proposta"
+    situacao = b2.selectbox(
+        "Situação",
+        srch.SITUACOES,
+        help="**Em vigor**: editais com propostas abertas; contratos e atas dentro da vigência "
+             "(calculado sobre os resultados carregados). Não se aplica a PCA.",
+    )
+    ordenacao = b3.selectbox(
+        "Ordenação",
+        pncp.ORDENACOES,
+        help="Mais recentes, mais antigos e mais relevantes vêm ordenados pelo PNCP. "
+             "Maior e menor valor ordenam os resultados carregados.",
+    )
 
-    hoje = date.today()
-    if modo == "publicacao":
-        periodo = b2.date_input(
-            "Período de publicação",
-            value=(hoje - timedelta(days=7), hoje),
-            max_value=hoje,
-            format="DD/MM/YYYY",
-        )
-        if isinstance(periodo, tuple) and len(periodo) == 2:
-            data_ini, data_fim = periodo
-        else:
-            data_ini = data_fim = periodo[0] if isinstance(periodo, tuple) else periodo
-    else:
-        data_fim = b2.date_input("Propostas encerram até", value=hoje + timedelta(days=30), format="DD/MM/YYYY")
-        data_ini = hoje
-
-    situacoes = b3.multiselect("Situação", pncp.SITUACOES, help="Situação da contratação no PNCP. Em branco = todas.")
-
-    # linha 3: ordenação, tamanho da busca, encerrados
-    c1, c2, c3 = st.columns(3)
-    ordenacao = c1.selectbox("Ordenação", pncp.ORDENACOES)
-    max_paginas = c2.slider(
-        "Páginas por modalidade (50 registros cada)", 1, 20, 3,
+    # linha 3: tamanho da busca e encerrados
+    c1, c2 = st.columns(2)
+    max_paginas = c1.slider(
+        "Páginas a carregar (50 registros cada)", 1, 20, 3,
         help="Aumente para trazer mais resultados; cada página é uma chamada ao PNCP.",
     )
-    somente_encerrados = c3.toggle(
+    somente_encerrados = c2.toggle(
         "Somente encerrados",
-        help="Homologados, com prazo de propostas vencido ou inexigibilidades (sem fase de propostas). "
-             "Revogadas, anuladas e suspensas ficam de fora.",
+        help="Editais homologados, com prazo de propostas vencido ou inexigibilidades (sem fase de propostas); "
+             "contratos e atas com vigência encerrada. Não se aplica a PCA.",
     )
 
     st.caption(
-        "**Dica.** O Tipo é obrigatório. A API do PNCP aceita só 1 UF e faz uma consulta por modalidade; "
-        "com Modalidade = Todas, só as modalidades do tipo escolhido são consultadas."
+        "**Dica.** Use ao menos um filtro além do tipo de documento. A API do PNCP aceita só 1 valor por "
+        "filtro (1 UF, 1 ano, 1 modalidade); para combinar múltiplos, faça buscas separadas."
     )
     buscar_btn = st.button("Buscar no PNCP", type="primary")
 
 if buscar_btn:
-    if not tipos:
-        st.error("Selecione ao menos um **Tipo** para buscar.")
-        st.stop()
+    doc = srch.TIPOS_DOCUMENTO[doc_label]
+    texto, palavras_locais = pncp.separar_termo(termo)
+    # Em vigor: no edital é filtro do PNCP (propostas abertas); em contrato/ata é calculado aqui
+    em_vigor = situacao == "Em vigor"
 
-    modalidades = [m for m in modalidades_sel if m != TODAS]
-    if TODAS in modalidades_sel or not modalidades:
-        modalidades = pncp.modalidades_para_tipos(tipos)
+    com_filtro = [bool(termo.strip()), uf != TODAS, ano != TODOS, modalidade is not None, em_vigor, somente_encerrados]
+    if not any(com_filtro):
+        st.error("Use ao menos um filtro além do tipo de documento.")
+        st.stop()
 
     try:
         with st.spinner("Consultando o PNCP… pode levar alguns segundos."):
             registros, meta = buscar(
-                modo, data_ini, data_fim, tuple(modalidades), None if uf == "Todas" else uf, max_paginas
+                doc, texto, None if uf == TODAS else uf, None if ano == TODOS else ano,
+                modalidade, em_vigor, ordenacao, max_paginas,
             )
         # guarda os filtros do momento da busca, para o resultado refletir exatamente o que foi pedido
         st.session_state["busca"] = {
-            "registros": registros, "meta": meta, "termo": termo, "tipos": tipos, "situacoes": situacoes,
-            "ordenacao": ordenacao, "somente_encerrados": somente_encerrados, "modalidades": modalidades,
+            "registros": registros, "meta": meta, "doc": doc, "doc_label": doc_label,
+            "palavras": palavras_locais, "ordenacao": ordenacao,
+            "somente_encerrados": somente_encerrados and doc != "pca",
+            "em_vigor_local": em_vigor and doc in ("contrato", "ata"),
         }
     except pncp.PNCPError as exc:
         st.session_state.pop("busca", None)
@@ -148,41 +138,61 @@ if buscar_btn:
 
 # ---------------------------------------------------------------------------- resultado
 if "busca" not in st.session_state:
-    st.info("Defina os filtros acima e clique em **Buscar no PNCP**.")
+    st.info("Escolha o tipo de documento, defina ao menos um filtro e clique em **Buscar no PNCP**.")
     st.stop()
 
 b = st.session_state["busca"]
 registros, meta = b["registros"], b["meta"]
 if not registros:
-    st.warning("Nenhuma contratação encontrada para esses filtros.")
+    st.warning("Nenhum resultado encontrado para esses filtros.")
     st.stop()
 
 filtrados = pncp.filtrar_e_ordenar(
-    registros, b["termo"], b["situacoes"], b["ordenacao"], b["somente_encerrados"], b["tipos"]
+    registros, b["palavras"], ordenacao=b["ordenacao"],
+    somente_encerrados=b["somente_encerrados"], em_vigor=b["em_vigor_local"],
 )
 
 total_valor = sum(r["valor_estimado"] or 0 for r in filtrados)
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("Exibindo", f"{len(filtrados):,}".replace(",", "."))
 m2.metric("Encerrados (exibidos)", f"{sum(r['encerrado'] for r in filtrados):,}".replace(",", "."))
-m3.metric("Carregadas / total no PNCP", f"{len(registros):,} / {meta['total_pncp']:,}".replace(",", "."))
-m4.metric("Valor estimado somado", moeda(total_valor))
-st.caption("Modalidades consultadas: " + ", ".join(pncp.MODALIDADES[m] for m in b["modalidades"]))
+m3.metric("Carregados / total no PNCP", f"{len(registros):,} / {meta['total_pncp']:,}".replace(",", "."))
+m4.metric("Valor somado", moeda(total_valor))
 if meta["truncado"]:
     st.caption(
-        "⚠️ Há mais resultados no PNCP do que o carregado. Aumente 'Páginas por modalidade' "
-        "ou refine por UF/modalidade/período."
+        "⚠️ Há mais resultados no PNCP do que o carregado. Aumente 'Páginas a carregar' ou refine "
+        "por UF, ano, modalidade ou termo."
+        + (" O PNCP entrega no máximo 10.000 resultados por busca." if meta["total_pncp"] >= 10000 else "")
     )
 
 if not filtrados:
-    st.warning("Nenhum resultado com esses filtros.")
+    st.warning("Nenhum resultado com esses filtros. Os filtros de encerrado, em vigor e carona valem "
+               "só para os resultados carregados: tente aumentar as páginas.")
     st.stop()
 
+COLUNAS = {
+    "data_publicacao": st.column_config.DatetimeColumn("Publicação", format="DD/MM/YYYY HH:mm"),
+    "titulo": st.column_config.TextColumn("Título", width="medium"),
+    "orgao": st.column_config.TextColumn("Órgão", width="medium"),
+    "municipio": st.column_config.TextColumn("Município"),
+    "uf": st.column_config.TextColumn("UF", width="small"),
+    "modalidade": st.column_config.TextColumn("Modalidade"),
+    "tipo": st.column_config.TextColumn("Tipo", help="Pregão · Ata/Carona (registro de preços) · INEX · Dispensa"),
+    "status": st.column_config.TextColumn("Status", width="medium"),
+    "objeto": st.column_config.TextColumn("Objeto", width="large"),
+    "valor_estimado": st.column_config.NumberColumn("Valor", format="R$ %.2f"),
+    "encerramento_proposta": st.column_config.DatetimeColumn("Encerra propostas", format="DD/MM/YYYY HH:mm"),
+    "vigencia_inicio": st.column_config.DateColumn("Início vigência", format="DD/MM/YYYY"),
+    "vigencia_fim": st.column_config.DateColumn("Fim vigência", format="DD/MM/YYYY"),
+    "fornecedor": st.column_config.TextColumn("Fornecedor"),
+    "situacao": st.column_config.TextColumn("Situação (PNCP)"),
+    "numero_compra": st.column_config.TextColumn("Nº", width="small"),
+    "link_pncp": st.column_config.LinkColumn("Fonte (PNCP)", display_text="Abrir no PNCP"),
+    "link_origem": st.column_config.LinkColumn("Sistema de origem", display_text="Abrir"),
+}
+
 df = para_dataframe(filtrados)
-tabela = df[[
-    "data_publicacao", "orgao", "municipio", "uf", "modalidade", "tipo", "status", "objeto", "valor_estimado",
-    "encerramento_proposta", "situacao", "numero_compra", "link_pncp", "link_origem",
-]]
+tabela = df[list(COLUNAS)].dropna(axis=1, how="all")  # some o que não existe para o tipo escolhido
 
 evento = st.dataframe(
     tabela,
@@ -190,38 +200,30 @@ evento = st.dataframe(
     hide_index=True,
     on_select="rerun",
     selection_mode="single-row",
-    column_config={
-        "data_publicacao": st.column_config.DatetimeColumn("Publicação", format="DD/MM/YYYY HH:mm"),
-        "orgao": st.column_config.TextColumn("Órgão", width="medium"),
-        "municipio": st.column_config.TextColumn("Município"),
-        "uf": st.column_config.TextColumn("UF", width="small"),
-        "modalidade": st.column_config.TextColumn("Modalidade"),
-        "tipo": st.column_config.TextColumn("Tipo", help="Pregão · Ata/Carona (registro de preços) · INEX · Dispensa"),
-        "status": st.column_config.TextColumn("Status", width="medium"),
-        "objeto": st.column_config.TextColumn("Objeto", width="large"),
-        "valor_estimado": st.column_config.NumberColumn("Valor estimado", format="R$ %.2f"),
-        "encerramento_proposta": st.column_config.DatetimeColumn("Encerra propostas", format="DD/MM/YYYY HH:mm"),
-        "situacao": st.column_config.TextColumn("Situação"),
-        "numero_compra": st.column_config.TextColumn("Nº", width="small"),
-        "link_pncp": st.column_config.LinkColumn("Fonte (PNCP)", display_text="Abrir no PNCP"),
-        "link_origem": st.column_config.LinkColumn("Sistema de origem", display_text="Abrir"),
-    },
+    column_config={c: COLUNAS[c] for c in tabela.columns},
 )
 
 # detalhe da linha selecionada
 if evento.selection.rows:
     r = filtrados[evento.selection.rows[0]]
     with st.container(border=True):
-        st.subheader(r["orgao"] or "Órgão não informado")
+        st.subheader(r["titulo"] or r["orgao"] or "Documento")
+        st.caption(r["orgao"] or "Órgão não informado")
         st.write(r["objeto"] or "—")
         d1, d2, d3 = st.columns(3)
-        d1.markdown(f"**Valor estimado:** {moeda(r['valor_estimado'])}")
-        d1.markdown(f"**Modalidade:** {r['modalidade']} ({r['modo_disputa'] or '—'})")
-        d2.markdown(f"**Local:** {r['municipio']}/{r['uf']} — {r['unidade'] or '—'}")
-        d2.markdown(f"**Processo:** {r['processo'] or '—'} · Nº {r['numero_compra'] or '—'}")
-        d3.markdown(f"**Amparo legal:** {r['amparo_legal'] or '—'}")
-        d3.markdown(f"**Registro de preços:** {'Sim' if r['srp'] else 'Não'}")
+        d1.markdown(f"**Valor:** {moeda(r['valor_estimado'])}")
+        if r["modalidade"]:
+            d1.markdown(f"**Modalidade:** {r['modalidade']} ({r['modo_disputa'] or '—'})")
+        if r["fornecedor"]:
+            d1.markdown(f"**Fornecedor:** {r['fornecedor']}")
+        d2.markdown(f"**Local:** {r['municipio'] or '—'}/{r['uf'] or '—'} — {r['unidade'] or '—'}")
+        d2.markdown(f"**Nº:** {r['numero_compra'] or '—'}")
+        if r["vigencia_inicio"] or r["vigencia_fim"]:
+            d2.markdown(f"**Vigência:** {(r['vigencia_inicio'] or '—')[:10]} a {(r['vigencia_fim'] or '—')[:10]}")
         d3.markdown(f"**Status:** {r['status']}")
+        d3.markdown(f"**Amparo legal:** {r['amparo_legal'] or '—'}")
+        if r["tipo_documento"] in ("edital", "ata"):
+            d3.markdown(f"**Registro de preços:** {'Sim' if r['srp'] or r['tipo_documento'] == 'ata' else 'Não'}")
         if r["informacao_complementar"]:
             st.caption(r["informacao_complementar"])
         if r["link_pncp"]:

@@ -201,25 +201,7 @@ def _sem_acento(texto: str | None) -> str:
     return "".join(c for c in texto if not unicodedata.combining(c)).lower()
 
 
-TIPOS = ["Pregão", "Ata/Carona (SRP)", "INEX", "Dispensa"]
-
-# situações da contratação no PNCP (situacaoCompraNome)
-SITUACOES = ["Divulgada no PNCP", "Revogada", "Anulada", "Suspensa"]
-
-# Modalidades do PNCP onde cada tipo costuma aparecer. Usado quando Modalidade = "Todas",
-# para consultar só o necessário em vez das 13 modalidades.
-TIPO_MODALIDADES = {
-    "Pregão": [6, 7],
-    "Ata/Carona (SRP)": [4, 5, 6, 7],  # registro de preços: em geral pregão e concorrência
-    "INEX": [9],
-    "Dispensa": [8],
-}
-
-
-def modalidades_para_tipos(tipos: Iterable[str]) -> list[int]:
-    return sorted({m for t in tipos for m in TIPO_MODALIDADES.get(t, [])})
-
-# palavras que, digitadas no termo de busca, ativam cada tipo
+# rótulos pesquisáveis de cada tag
 _SINONIMOS_TIPO = {
     "Pregão": "pregao",
     "Ata/Carona (SRP)": "ata carona adesao registro de precos srp",
@@ -230,7 +212,33 @@ STATUS_ENCERRADOS = (
     "Homologado",
     "Encerrado (prazo de propostas vencido)",
     "Encerrado (contratação direta)",
+    "Vigência encerrada",  # contratos e atas
 )
+
+# Palavras do termo de busca que NÃO vão para o PNCP: são rótulos calculados aqui
+# (o PNCP não tem campo "encerrado", "carona" nem "inex"). Cada uma vira o rótulo canônico.
+_PALAVRAS_CHAVE = {
+    "encerrado": "encerrado", "encerrados": "encerrado", "encerrada": "encerrado", "encerradas": "encerrado",
+    "carona": "carona", "caronas": "carona",
+    "inex": "inex",
+}
+
+
+def separar_termo(termo: str | None) -> tuple[str, str]:
+    """Divide o termo em (texto para o PNCP, palavras-chave aplicadas localmente).
+
+    "encerrado carona merenda" -> ("merenda", "encerrado carona")
+    """
+    texto, locais = [], []
+    for palavra in (termo or "").split():
+        chave = _sem_acento(palavra)
+        if chave in _PALAVRAS_CHAVE:
+            canonica = _PALAVRAS_CHAVE[chave]
+            if canonica not in locais:
+                locais.append(canonica)
+        else:
+            texto.append(palavra)
+    return " ".join(texto), " ".join(locais)
 
 
 def _agora() -> datetime:
@@ -251,15 +259,17 @@ def _parse_dt(valor) -> datetime | None:
 
 
 def classificar(reg: dict, agora: datetime | None = None) -> dict:
-    """Acrescenta status do processo e tipos (Pregão, Ata/Carona, INEX, Dispensa).
+    """Acrescenta status do processo e tags (Pregão, Ata/Carona, INEX, Dispensa).
 
     O PNCP não tem um campo "encerrado"; ele é derivado de:
-      situação (revogada/anulada/suspensa) > valor homologado > prazo de propostas vencido.
-    Inexigibilidade não tem fase de propostas (datas vêm vazias): sem homologação
-    informada, é tratada como "Encerrado (contratação direta)".
-    "Ata/Carona (SRP)" = compra em registro de preços, de onde nascem as atas para adesão.
+      editais:  situação (revogada/anulada/suspensa) > valor homologado > prazo de propostas vencido.
+                Inexigibilidade não tem fase de propostas (datas vêm vazias): sem homologação
+                informada, é tratada como "Encerrado (contratação direta)".
+      contratos e atas: vigência (cancelada / em vigor / vigência encerrada / vigência futura).
+    "Ata/Carona (SRP)" = compra em registro de preços ou ata, de onde vêm as adesões (carona).
     """
     agora = agora or _agora()
+    doc = reg.get("tipo_documento") or "edital"
     modalidade = _sem_acento(reg.get("modalidade"))
     situacao = _sem_acento(reg.get("situacao"))
     fim = _parse_dt(reg.get("encerramento_proposta"))
@@ -267,14 +277,26 @@ def classificar(reg: dict, agora: datetime | None = None) -> dict:
     tags = []
     if "pregao" in modalidade:
         tags.append("Pregão")
-    if reg.get("srp"):
+    if reg.get("srp") or doc == "ata":
         tags.append("Ata/Carona (SRP)")
     if "inexigibilidade" in modalidade:
         tags.append("INEX")
     if "dispensa" in modalidade:
         tags.append("Dispensa")
 
-    if "revogad" in situacao:
+    if doc in ("contrato", "ata"):
+        v_ini, v_fim, hoje = _parse_dt(reg.get("vigencia_inicio")), _parse_dt(reg.get("vigencia_fim")), agora.date()
+        if reg.get("cancelado"):
+            status = "Cancelada"
+        elif v_fim and v_fim.date() < hoje:
+            status = "Vigência encerrada"
+        elif v_ini and v_ini.date() > hoje:
+            status = "Vigência futura"
+        else:
+            status = "Em vigor"
+    elif doc == "pca":
+        status = "Plano anual"
+    elif "revogad" in situacao:
         status = "Revogada"
     elif "anulad" in situacao:
         status = "Anulada"
@@ -303,11 +325,6 @@ def _padrao(termo: str) -> re.Pattern:
     return re.compile(r"(?<![a-z0-9])" + re.escape(termo))
 
 
-def _relevancia(reg: dict, padroes: list[re.Pattern]) -> int:
-    alvo = _sem_acento(f"{reg.get('objeto')} {reg.get('orgao')}")
-    return sum(len(p.findall(alvo)) for p in padroes)
-
-
 def filtrar_e_ordenar(
     registros: list[dict],
     termo: str = "",
@@ -316,11 +333,13 @@ def filtrar_e_ordenar(
     somente_encerrados: bool = False,
     tipos: Iterable[str] | None = None,
     agora: datetime | None = None,
+    em_vigor: bool = False,
 ) -> list[dict]:
-    """A API do PNCP não tem busca por texto: o termo é aplicado aqui.
+    """Filtros e ordenação aplicados localmente sobre o que já foi carregado do PNCP.
 
     O termo procura em objeto, órgão, unidade, município e também nos rótulos calculados
     (ex.: "encerrado", "carona", "inex", "pregão"). Todas as palavras precisam casar.
+    "Mais relevantes" mantém a ordem recebida do PNCP.
     """
     agora = agora or _agora()
     padroes = [_padrao(t) for t in _sem_acento(termo).split() if t]
@@ -333,6 +352,8 @@ def filtrar_e_ordenar(
             continue
         if somente_encerrados and not r["encerrado"]:
             continue
+        if em_vigor and r["status"] != "Em vigor":
+            continue
         if tipos and not tipos.intersection(r["tags"]):
             continue
         if padroes:
@@ -342,7 +363,6 @@ def filtrar_e_ordenar(
             if not all(p.search(alvo) for p in padroes):
                 continue
         saida.append(r)
-    termos = padroes
 
     if ordenacao == "Mais antigos primeiro":
         saida.sort(key=lambda r: r.get("data_publicacao") or "")
@@ -350,8 +370,6 @@ def filtrar_e_ordenar(
         saida.sort(key=lambda r: r.get("valor_estimado") or -1, reverse=True)
     elif ordenacao == "Menor valor primeiro":
         saida.sort(key=lambda r: r.get("valor_estimado") if r.get("valor_estimado") is not None else float("inf"))
-    elif ordenacao == "Mais relevantes" and termos:
-        saida.sort(key=lambda r: (_relevancia(r, termos), r.get("data_publicacao") or ""), reverse=True)
-    else:  # mais recentes
+    elif ordenacao != "Mais relevantes":  # mais recentes
         saida.sort(key=lambda r: r.get("data_publicacao") or "", reverse=True)
     return saida
