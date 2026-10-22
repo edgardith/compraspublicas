@@ -33,14 +33,30 @@ def para_dataframe(registros: list[dict]) -> pd.DataFrame:
 # ------------------------------------------------------------------------- cabeçalho
 st.title("🔎 Radar de Compras Públicas")
 st.caption(
-    "Contratações publicadas no Portal Nacional de Contratações Públicas (PNCP). "
+    "Pesquise contratações publicadas no Portal Nacional de Contratações Públicas (PNCP). "
     "Cada linha leva à página oficial da fonte."
 )
 
 # --------------------------------------------------------------------------- filtros
-with st.sidebar:
-    st.header("Consulta no PNCP")
-    modo_label = st.radio(
+# Todos os filtros ficam antes do botão; ao clicar em "Buscar no PNCP" eles são aplicados juntos.
+with st.container(border=True):
+    termo = st.text_input(
+        "Termo de busca",
+        placeholder="ex.: encerrado carona merenda · inex software · pregão material escolar",
+        help=(
+            "A API do PNCP não busca por texto: o termo filtra os resultados carregados "
+            "(objeto, órgão, município) e também os rótulos calculados:\n\n"
+            "• **encerrado** → processos encerrados/homologados\n"
+            "• **carona** ou **ata** → compras em registro de preços (SRP)\n"
+            "• **inex** → inexigibilidade\n"
+            "• **pregão**, **dispensa**\n\n"
+            "Todas as palavras precisam casar. Ex.: `encerrado carona escolar`."
+        ),
+    )
+
+    # linha 1: consulta, período, UF
+    a1, a2, a3 = st.columns(3)
+    modo_label = a1.radio(
         "Tipo de consulta",
         ["Publicadas no período", "Com propostas abertas"],
         help="'Com propostas abertas' lista o que ainda aceita propostas até a data escolhida.",
@@ -49,7 +65,7 @@ with st.sidebar:
 
     hoje = date.today()
     if modo == "publicacao":
-        periodo = st.date_input(
+        periodo = a2.date_input(
             "Período de publicação",
             value=(hoje - timedelta(days=7), hoje),
             max_value=hoje,
@@ -60,11 +76,14 @@ with st.sidebar:
         else:
             data_ini = data_fim = periodo[0] if isinstance(periodo, tuple) else periodo
     else:
-        data_fim = st.date_input("Propostas encerram até", value=hoje + timedelta(days=30), format="DD/MM/YYYY")
+        data_fim = a2.date_input("Propostas encerram até", value=hoje + timedelta(days=30), format="DD/MM/YYYY")
         data_ini = hoje
 
-    uf = st.selectbox("UF", ["Todas"] + pncp.UFS, index=0)
-    modalidades = st.multiselect(
+    uf = a3.selectbox("UF", ["Todas"] + pncp.UFS, index=0)
+
+    # linha 2: modalidade, tipo, situação
+    b1, b2, b3 = st.columns(3)
+    modalidades = b1.multiselect(
         "Modalidade",
         options=list(pncp.MODALIDADES),
         default=[6] if modo == "publicacao" else [],
@@ -72,11 +91,27 @@ with st.sidebar:
         help="A API do PNCP faz uma consulta por modalidade; quanto mais modalidades, mais demorada a busca."
         + (" Em branco = todas." if modo == "proposta" else ""),
     )
-    max_paginas = st.slider(
+    tipos = b2.multiselect("Tipo", pncp.TIPOS, help="Mostra processos de qualquer um dos tipos escolhidos.")
+    situacoes = b3.multiselect("Situação", pncp.SITUACOES, help="Situação da contratação no PNCP. Em branco = todas.")
+
+    # linha 3: ordenação, tamanho da busca, encerrados
+    c1, c2, c3 = st.columns(3)
+    ordenacao = c1.selectbox("Ordenação", pncp.ORDENACOES)
+    max_paginas = c2.slider(
         "Páginas por modalidade (50 registros cada)", 1, 20, 3,
         help="Aumente para trazer mais resultados; cada página é uma chamada ao PNCP.",
     )
-    buscar_btn = st.button("Buscar no PNCP", type="primary", width="stretch")
+    somente_encerrados = c3.toggle(
+        "Somente encerrados",
+        help="Homologados, com prazo de propostas vencido ou inexigibilidades (sem fase de propostas). "
+             "Revogadas, anuladas e suspensas ficam de fora.",
+    )
+
+    st.caption(
+        "**Dica.** A API do PNCP aceita só 1 valor por UF e uma consulta por modalidade. "
+        "Para pregões, atas e INEX, selecione as modalidades 6, 7 e 9."
+    )
+    buscar_btn = st.button("Buscar no PNCP", type="primary")
 
 if buscar_btn:
     try:
@@ -84,49 +119,29 @@ if buscar_btn:
             registros, meta = buscar(
                 modo, data_ini, data_fim, tuple(modalidades), None if uf == "Todas" else uf, max_paginas
             )
-        st.session_state["resultado"] = (registros, meta)
+        # guarda os filtros do momento da busca, para o resultado refletir exatamente o que foi pedido
+        st.session_state["busca"] = {
+            "registros": registros, "meta": meta, "termo": termo, "tipos": tipos, "situacoes": situacoes,
+            "ordenacao": ordenacao, "somente_encerrados": somente_encerrados,
+        }
     except pncp.PNCPError as exc:
-        st.session_state.pop("resultado", None)
+        st.session_state.pop("busca", None)
         st.error(f"Não consegui consultar o PNCP: {exc}")
 
 # ---------------------------------------------------------------------------- resultado
-if "resultado" not in st.session_state:
-    st.info("Defina os filtros na barra lateral e clique em **Buscar no PNCP**.")
+if "busca" not in st.session_state:
+    st.info("Defina os filtros acima e clique em **Buscar no PNCP**.")
     st.stop()
 
-registros, meta = st.session_state["resultado"]
+b = st.session_state["busca"]
+registros, meta = b["registros"], b["meta"]
 if not registros:
     st.warning("Nenhuma contratação encontrada para esses filtros.")
     st.stop()
 
-# filtros locais (não refazem a chamada ao PNCP)
-c1, c2, c3 = st.columns([3, 2, 2])
-termo = c1.text_input(
-    "Termo de busca",
-    placeholder="ex.: encerrado carona merenda · inex software · pregão material escolar",
-    help=(
-        "A API do PNCP não busca por texto: o termo filtra os resultados já carregados "
-        "(objeto, órgão, município) e também os rótulos calculados:\n\n"
-        "• **encerrado** → processos encerrados/homologados\n"
-        "• **carona** ou **ata** → compras em registro de preços (SRP)\n"
-        "• **inex** → inexigibilidade\n"
-        "• **pregão**, **dispensa**\n\n"
-        "Todas as palavras precisam casar. Ex.: `encerrado carona escolar`."
-    ),
+filtrados = pncp.filtrar_e_ordenar(
+    registros, b["termo"], b["situacoes"], b["ordenacao"], b["somente_encerrados"], b["tipos"]
 )
-tipos = c2.multiselect("Tipo", pncp.TIPOS, help="Mostra processos de qualquer um dos tipos escolhidos.")
-ordenacao = c3.selectbox("Ordenação", pncp.ORDENACOES)
-
-f1, f2 = st.columns([1, 2])
-somente_encerrados = f1.toggle(
-    "Somente encerrados",
-    help="Homologados, com prazo de propostas vencido ou inexigibilidades (sem fase de propostas). "
-         "Revogadas, anuladas e suspensas ficam de fora.",
-)
-situacoes_disp = sorted({r["situacao"] for r in registros if r["situacao"]})
-situacoes = f2.multiselect("Situação (PNCP)", situacoes_disp)
-
-filtrados = pncp.filtrar_e_ordenar(registros, termo, situacoes, ordenacao, somente_encerrados, tipos)
 
 total_valor = sum(r["valor_estimado"] or 0 for r in filtrados)
 m1, m2, m3, m4 = st.columns(4)
@@ -141,7 +156,7 @@ if meta["truncado"]:
     )
 
 if not filtrados:
-    st.warning("Nenhum resultado com esses filtros locais.")
+    st.warning("Nenhum resultado com esses filtros.")
     st.stop()
 
 df = para_dataframe(filtrados)

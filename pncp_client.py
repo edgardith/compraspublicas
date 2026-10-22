@@ -203,6 +203,9 @@ def _sem_acento(texto: str | None) -> str:
 
 TIPOS = ["Pregão", "Ata/Carona (SRP)", "INEX", "Dispensa"]
 
+# situações da contratação no PNCP (situacaoCompraNome)
+SITUACOES = ["Divulgada no PNCP", "Revogada", "Anulada", "Suspensa"]
+
 # palavras que, digitadas no termo de busca, ativam cada tipo
 _SINONIMOS_TIPO = {
     "Pregão": "pregao",
@@ -308,12 +311,12 @@ def filtrar_e_ordenar(
     """
     agora = agora or _agora()
     padroes = [_padrao(t) for t in _sem_acento(termo).split() if t]
-    situacoes = set(situacoes or [])
+    situacoes = {_sem_acento(s) for s in (situacoes or [])}
     tipos = set(tipos or [])
 
     saida = []
     for r in (classificar(x, agora) for x in registros):
-        if situacoes and r.get("situacao") not in situacoes:
+        if situacoes and _sem_acento(r.get("situacao")) not in situacoes:
             continue
         if somente_encerrados and not r["encerrado"]:
             continue
