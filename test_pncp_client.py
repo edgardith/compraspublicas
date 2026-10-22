@@ -1,5 +1,5 @@
 """Testes com um registro real (estrutura devolvida pela API de consulta do PNCP)."""
-from datetime import date
+from datetime import date, datetime
 
 import pytest
 
@@ -110,3 +110,89 @@ def test_proposta_sem_modalidade_faz_uma_consulta(monkeypatch):
     pncp.buscar_contratacoes("proposta", date(2026, 10, 22), date(2026, 11, 30), [])
     assert len(chamadas) == 1 and "codigoModalidadeContratacao" not in chamadas[0]
     assert "dataInicial" not in chamadas[0]
+
+
+# ------------------------------------------------- status, tipos e busca por termo
+AGORA = datetime(2026, 10, 22, 14, 0)
+
+
+def _reg(**extra):
+    return pncp.normalizar({**ITEM_REAL, **extra})
+
+
+def test_pregao_com_prazo_vencido_e_encerrado():
+    r = pncp.classificar(_reg(), AGORA)  # prazo 21/09, hoje 22/10
+    assert r["status"] == "Encerrado (prazo de propostas vencido)" and r["encerrado"]
+    assert r["tags"] == ["Pregão"]
+
+
+def test_pregao_com_prazo_futuro_esta_em_andamento():
+    r = pncp.classificar(_reg(dataEncerramentoProposta="2026-11-30T10:00:00"), AGORA)
+    assert r["status"].startswith("Em andamento") and not r["encerrado"]
+
+
+def test_homologado_e_encerrado_mesmo_com_prazo_futuro():
+    r = pncp.classificar(_reg(dataEncerramentoProposta="2026-11-30T10:00:00", valorTotalHomologado=1500.0), AGORA)
+    assert r["status"] == "Homologado" and r["encerrado"]
+
+
+def test_inexigibilidade_sem_datas_e_encerrada_como_contratacao_direta():
+    r = pncp.classificar(_reg(modalidadeNome="Inexigibilidade", dataAberturaProposta=None,
+                              dataEncerramentoProposta=None), AGORA)
+    assert r["tags"] == ["INEX"]
+    assert r["status"] == "Encerrado (contratação direta)" and r["encerrado"]
+
+
+def test_srp_vira_ata_carona():
+    r = pncp.classificar(_reg(srp=True), AGORA)
+    assert r["tags"] == ["Pregão", "Ata/Carona (SRP)"]
+
+
+def test_revogada_nao_conta_como_encerrada():
+    r = pncp.classificar(_reg(situacaoCompraNome="Revogada"), AGORA)
+    assert r["status"] == "Revogada" and not r["encerrado"]
+
+
+def test_dispensa_sem_prazo_nao_e_chutada_como_encerrada():
+    r = pncp.classificar(_reg(modalidadeNome="Dispensa", dataEncerramentoProposta=None), AGORA)
+    assert r["status"] == "Sem prazo informado" and not r["encerrado"]
+
+
+def _carteira():
+    return [
+        _reg(sequencialCompra=1, numeroControlePNCP="a", srp=True, objetoCompra="Registro de preços de merenda escolar"),
+        _reg(sequencialCompra=2, numeroControlePNCP="b", modalidadeNome="Inexigibilidade",
+             dataEncerramentoProposta=None, objetoCompra="Curso de capacitação de professores"),
+        _reg(sequencialCompra=3, numeroControlePNCP="c", dataEncerramentoProposta="2026-12-01T10:00:00",
+             objetoCompra="Pregão para compra de notebooks"),
+    ]
+
+
+def _ids(regs):
+    return sorted(r["numero_controle"] for r in regs)
+
+
+def test_termo_encerrado_usa_o_rotulo_calculado():
+    assert _ids(pncp.filtrar_e_ordenar(_carteira(), "encerrado", agora=AGORA)) == ["a", "b"]
+
+
+def test_termo_carona_e_ata_pegam_registro_de_precos():
+    assert _ids(pncp.filtrar_e_ordenar(_carteira(), "carona", agora=AGORA)) == ["a"]
+    assert _ids(pncp.filtrar_e_ordenar(_carteira(), "ata", agora=AGORA)) == ["a"]
+
+
+def test_termo_ata_nao_casa_com_contratacao():
+    carteira = [_reg(objetoCompra="Contratação de serviço de limpeza", numeroControlePNCP="z")]
+    assert pncp.filtrar_e_ordenar(carteira, "ata", agora=AGORA) == []
+
+
+def test_termo_inex_e_combinacao_de_palavras():
+    assert _ids(pncp.filtrar_e_ordenar(_carteira(), "inex", agora=AGORA)) == ["b"]
+    assert _ids(pncp.filtrar_e_ordenar(_carteira(), "encerrado carona escolar", agora=AGORA)) == ["a"]
+
+
+def test_toggle_encerrados_e_filtro_de_tipo():
+    c = _carteira()
+    assert _ids(pncp.filtrar_e_ordenar(c, somente_encerrados=True, agora=AGORA)) == ["a", "b"]
+    assert _ids(pncp.filtrar_e_ordenar(c, somente_encerrados=True, tipos=["INEX"], agora=AGORA)) == ["b"]
+    assert _ids(pncp.filtrar_e_ordenar(c, tipos=["INEX", "Ata/Carona (SRP)"], agora=AGORA)) == ["a", "b"]
