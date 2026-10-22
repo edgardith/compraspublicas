@@ -206,6 +206,19 @@ TIPOS = ["Pregão", "Ata/Carona (SRP)", "INEX", "Dispensa"]
 # situações da contratação no PNCP (situacaoCompraNome)
 SITUACOES = ["Divulgada no PNCP", "Revogada", "Anulada", "Suspensa"]
 
+# Modalidades do PNCP onde cada tipo costuma aparecer. Usado quando Modalidade = "Todas",
+# para consultar só o necessário em vez das 13 modalidades.
+TIPO_MODALIDADES = {
+    "Pregão": [6, 7],
+    "Ata/Carona (SRP)": [4, 5, 6, 7],  # registro de preços: em geral pregão e concorrência
+    "INEX": [9],
+    "Dispensa": [8],
+}
+
+
+def modalidades_para_tipos(tipos: Iterable[str]) -> list[int]:
+    return sorted({m for t in tipos for m in TIPO_MODALIDADES.get(t, [])})
+
 # palavras que, digitadas no termo de busca, ativam cada tipo
 _SINONIMOS_TIPO = {
     "Pregão": "pregao",

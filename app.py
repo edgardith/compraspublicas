@@ -11,6 +11,8 @@ import pncp_client as pncp
 
 st.set_page_config(page_title="Radar de Compras Públicas", page_icon="🔎", layout="wide")
 
+TODAS = "Todas"
+
 
 @st.cache_data(ttl=3600, show_spinner=False)  # cache de 1h, como no sistema de referência
 def buscar(modo, data_ini, data_fim, modalidades, uf, max_paginas):
@@ -54,9 +56,30 @@ with st.container(border=True):
         ),
     )
 
-    # linha 1: consulta, período, UF
+    # linha 1: tipo (obrigatório), modalidade (opcional), UF
     a1, a2, a3 = st.columns(3)
-    modo_label = a1.radio(
+    tipos = a1.multiselect(
+        "Tipo (obrigatório)",
+        pncp.TIPOS,
+        default=["Pregão"],
+        help="Obrigatório. Define o que será buscado: Pregão, Ata/Carona (compras em registro de preços), "
+             "INEX (inexigibilidade) e/ou Dispensa.",
+    )
+    modalidades_sel = a2.multiselect(
+        "Modalidade (opcional)",
+        [TODAS] + list(pncp.MODALIDADES),
+        default=[TODAS],
+        format_func=lambda c: c if c == TODAS else pncp.MODALIDADES[c],
+        help="**Todas** = o app escolhe as modalidades a partir do Tipo "
+             "(Pregão → 6 e 7 · INEX → 9 · Dispensa → 8 · Ata/Carona → 4, 5, 6 e 7). "
+             "Escolha modalidades específicas para limitar a busca; Tipo e Modalidade se somam, "
+             "então precisam coincidir.",
+    )
+    uf = a3.selectbox("UF", ["Todas"] + pncp.UFS, index=0)
+
+    # linha 2: consulta, período, situação
+    b1, b2, b3 = st.columns(3)
+    modo_label = b1.radio(
         "Tipo de consulta",
         ["Publicadas no período", "Com propostas abertas"],
         help="'Com propostas abertas' lista o que ainda aceita propostas até a data escolhida.",
@@ -65,7 +88,7 @@ with st.container(border=True):
 
     hoje = date.today()
     if modo == "publicacao":
-        periodo = a2.date_input(
+        periodo = b2.date_input(
             "Período de publicação",
             value=(hoje - timedelta(days=7), hoje),
             max_value=hoje,
@@ -76,22 +99,9 @@ with st.container(border=True):
         else:
             data_ini = data_fim = periodo[0] if isinstance(periodo, tuple) else periodo
     else:
-        data_fim = a2.date_input("Propostas encerram até", value=hoje + timedelta(days=30), format="DD/MM/YYYY")
+        data_fim = b2.date_input("Propostas encerram até", value=hoje + timedelta(days=30), format="DD/MM/YYYY")
         data_ini = hoje
 
-    uf = a3.selectbox("UF", ["Todas"] + pncp.UFS, index=0)
-
-    # linha 2: modalidade, tipo, situação
-    b1, b2, b3 = st.columns(3)
-    modalidades = b1.multiselect(
-        "Modalidade",
-        options=list(pncp.MODALIDADES),
-        default=[6] if modo == "publicacao" else [],
-        format_func=lambda c: pncp.MODALIDADES[c],
-        help="A API do PNCP faz uma consulta por modalidade; quanto mais modalidades, mais demorada a busca."
-        + (" Em branco = todas." if modo == "proposta" else ""),
-    )
-    tipos = b2.multiselect("Tipo", pncp.TIPOS, help="Mostra processos de qualquer um dos tipos escolhidos.")
     situacoes = b3.multiselect("Situação", pncp.SITUACOES, help="Situação da contratação no PNCP. Em branco = todas.")
 
     # linha 3: ordenação, tamanho da busca, encerrados
@@ -108,12 +118,20 @@ with st.container(border=True):
     )
 
     st.caption(
-        "**Dica.** A API do PNCP aceita só 1 valor por UF e uma consulta por modalidade. "
-        "Para pregões, atas e INEX, selecione as modalidades 6, 7 e 9."
+        "**Dica.** O Tipo é obrigatório. A API do PNCP aceita só 1 UF e faz uma consulta por modalidade; "
+        "com Modalidade = Todas, só as modalidades do tipo escolhido são consultadas."
     )
     buscar_btn = st.button("Buscar no PNCP", type="primary")
 
 if buscar_btn:
+    if not tipos:
+        st.error("Selecione ao menos um **Tipo** para buscar.")
+        st.stop()
+
+    modalidades = [m for m in modalidades_sel if m != TODAS]
+    if TODAS in modalidades_sel or not modalidades:
+        modalidades = pncp.modalidades_para_tipos(tipos)
+
     try:
         with st.spinner("Consultando o PNCP… pode levar alguns segundos."):
             registros, meta = buscar(
@@ -122,7 +140,7 @@ if buscar_btn:
         # guarda os filtros do momento da busca, para o resultado refletir exatamente o que foi pedido
         st.session_state["busca"] = {
             "registros": registros, "meta": meta, "termo": termo, "tipos": tipos, "situacoes": situacoes,
-            "ordenacao": ordenacao, "somente_encerrados": somente_encerrados,
+            "ordenacao": ordenacao, "somente_encerrados": somente_encerrados, "modalidades": modalidades,
         }
     except pncp.PNCPError as exc:
         st.session_state.pop("busca", None)
@@ -149,6 +167,7 @@ m1.metric("Exibindo", f"{len(filtrados):,}".replace(",", "."))
 m2.metric("Encerrados (exibidos)", f"{sum(r['encerrado'] for r in filtrados):,}".replace(",", "."))
 m3.metric("Carregadas / total no PNCP", f"{len(registros):,} / {meta['total_pncp']:,}".replace(",", "."))
 m4.metric("Valor estimado somado", moeda(total_valor))
+st.caption("Modalidades consultadas: " + ", ".join(pncp.MODALIDADES[m] for m in b["modalidades"]))
 if meta["truncado"]:
     st.caption(
         "⚠️ Há mais resultados no PNCP do que o carregado. Aumente 'Páginas por modalidade' "

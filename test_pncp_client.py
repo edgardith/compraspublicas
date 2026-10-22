@@ -196,3 +196,12 @@ def test_toggle_encerrados_e_filtro_de_tipo():
     assert _ids(pncp.filtrar_e_ordenar(c, somente_encerrados=True, agora=AGORA)) == ["a", "b"]
     assert _ids(pncp.filtrar_e_ordenar(c, somente_encerrados=True, tipos=["INEX"], agora=AGORA)) == ["b"]
     assert _ids(pncp.filtrar_e_ordenar(c, tipos=["INEX", "Ata/Carona (SRP)"], agora=AGORA)) == ["a", "b"]
+
+
+# ---------------------------------------- modalidades derivadas do tipo (Modalidade = Todas)
+def test_modalidades_para_tipos():
+    assert pncp.modalidades_para_tipos(["Pregão"]) == [6, 7]
+    assert pncp.modalidades_para_tipos(["INEX"]) == [9]
+    assert pncp.modalidades_para_tipos(["Pregão", "INEX", "Dispensa"]) == [6, 7, 8, 9]
+    assert pncp.modalidades_para_tipos(["Ata/Carona (SRP)", "Pregão"]) == [4, 5, 6, 7]
+    assert pncp.modalidades_para_tipos([]) == []
