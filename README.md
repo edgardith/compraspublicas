@@ -63,3 +63,10 @@ Todos ficam antes do botão **Buscar no PNCP** e valem juntos ao clicar nele.
 - Alertas diários por palavra-chave de educação (B2G).
 - Salvar o histórico em SQLite para busca local sobre toda a base.
 - Exportação em lote quando o resultado passa de 10.000 registros.
+
+## Monitores (abas)
+
+- **🏆 Empresas vencedoras** — palavra-chave (obrigatória) + UF/Ano → ranking de fornecedores por valor contratado, nº de contratos, ticket médio, órgãos e UFs. Fornecedores são agrupados por CNPJ (variações de nome viram um só). Clique numa linha para ver os contratos com link do PNCP.
+- **🎯 Concorrentes** — lista (um por linha) de nomes, CNPJs (14 dígitos) ou raízes (8 dígitos = matriz + filiais). `Grupo = nome1, cnpj2` junta distribuidores sob um mesmo concorrente. Palavra-chave do objeto é opcional.
+- Valor = valor global dos contratos publicados; **não é faturamento**. Rankings são parciais quando há mais contratos que o carregado (aviso na tela; limite do PNCP: 10.000 por busca).
+- Arquivos novos: `analise.py`, `monitores.py`, `ui.py`, `test_analise.py`. Altere também `app.py` e `pncp_search.py`.

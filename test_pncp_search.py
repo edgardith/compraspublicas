@@ -48,6 +48,8 @@ CONTRATO = {
     "situacao_nome": "Divulgada no PNCP",
     "cancelado": False,
     "fornecedor_nome": "EMPRESA X LTDA",
+    "fornecedor_ni": "46064123000197",
+    "data_assinatura": "2025-12-02",
     "uf": "SP",
 }
 
@@ -84,6 +86,7 @@ def test_normalizar_edital():
 def test_normalizar_contrato_e_ata_usam_vigencia():
     c = srch.normalizar_busca(CONTRATO)
     assert c["valor_estimado"] == 1647199.99 and c["fornecedor"] == "EMPRESA X LTDA"
+    assert (c["fornecedor_ni"], c["data_assinatura"]) == ("46064123000197", "2025-12-02")
     assert (c["vigencia_inicio"], c["vigencia_fim"]) == ("2025-12-02", "2026-12-01")
     assert c["encerramento_proposta"] is None
     a = srch.normalizar_busca(ATA)

@@ -127,6 +127,8 @@ def normalizar_busca(item: dict) -> dict:
         "cancelado": bool(item.get("cancelado")),
         "permite_adesao": item.get("permite_adesao"),
         "fornecedor": item.get("fornecedor_nome"),
+        "fornecedor_ni": item.get("fornecedor_ni"),
+        "data_assinatura": item.get("data_assinatura"),
         "ano": item.get("ano"),
         "link_pncp": link_portal(item.get("item_url")),
         "link_origem": item.get("link_sistema_origem") or item.get("link_processo_eletronico"),
